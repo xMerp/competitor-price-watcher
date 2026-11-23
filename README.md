@@ -4,6 +4,16 @@ A small n8n workflow that checks competitor product catalogues every Monday and 
 
 Built as a first version of a "competitor watcher": scheduled data pull, change detection, and a check that flags a broken source instead of silently reporting wrong numbers.
 
+## Screenshots
+
+**Workflow canvas**
+
+![Workflow canvas](workflow-canvas.png)
+
+**First run: baseline saved**
+
+![Baseline output](baseline-output.png)
+
 ## What it does
 
 1. **Every Monday 9am** (Schedule Trigger) starts the run. A **Manual Test** trigger is there for trying it by hand.
