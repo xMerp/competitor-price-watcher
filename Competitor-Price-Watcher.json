@@ -1,0 +1,142 @@
+{
+  "name": "Competitor Price Watcher",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "weeks",
+              "triggerAtDay": [
+                1
+              ],
+              "triggerAtHour": 9
+            }
+          ]
+        }
+      },
+      "id": "a1000000-0000-4000-8000-000000000001",
+      "name": "Every Monday 9am",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "a1000000-0000-4000-8000-000000000002",
+      "name": "Manual Test",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// EDIT THIS LIST. Each URL must open in a browser and show JSON (Shopify stores only).\n// Use 3-5 women's western-wear brands in Berrylush's price band.\nconst stores = [\n  { store: 'Sassafras',     url: 'https://www.sassafras.in/products.json?limit=250' },\n  { store: 'Zink London',   url: 'https://zinklondon.com/products.json?limit=250' },\n  { store: 'Tokyo Talkies', url: 'https://www.tokyotalkies.com/products.json?limit=250' },\n];\nreturn stores.map(s => ({ json: s }));\n"
+      },
+      "id": "a1000000-0000-4000-8000-000000000003",
+      "name": "Store List",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        260,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.url }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "Mozilla/5.0 (compatible; price-watch-demo)"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 20000
+        }
+      },
+      "id": "a1000000-0000-4000-8000-000000000004",
+      "name": "Fetch products.json",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        520,
+        100
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Compares this run's prices with the last run (kept in workflow static data).\n// Static data only persists when the workflow is ACTIVE (scheduled runs), not on manual test runs.\nconst SD = $getWorkflowStaticData('global');\nconst prev = SD.prices || {};\nconst firstRun = Object.keys(prev).length === 0;\n\nconst stores = $('Store List').all().map(i => i.json);\nconst responses = $input.all();\n\nconst cur = {};\nconst okStores = new Set();\nconst failedStores = [];\n\nresponses.forEach((item, i) => {\n  const store = stores[i] ? stores[i].store : 'source-' + i;\n  const products = item.json && Array.isArray(item.json.products) ? item.json.products : null;\n  // Stale/broken-source check: an error or empty catalogue is flagged, never treated as \"all products removed\".\n  if (!products || products.length === 0) { failedStores.push(store); return; }\n  okStores.add(store);\n  for (const p of products) {\n    const prices = (p.variants || []).map(v => parseFloat(v.price)).filter(n => !isNaN(n));\n    if (!prices.length) continue;\n    cur[store + '|' + p.handle] = { store, title: p.title, price: Math.min(...prices) };\n  }\n});\n\nconst changes = [];\nfor (const [key, now] of Object.entries(cur)) {\n  const before = prev[key];\n  if (!before) {\n    if (!firstRun) changes.push({ type: 'new', store: now.store, title: now.title, price: now.price });\n  } else if (before.price !== now.price) {\n    const pct = ((now.price - before.price) / before.price) * 100;\n    changes.push({ type: 'price', store: now.store, title: now.title, oldPrice: before.price, newPrice: now.price, pct: Math.round(pct * 10) / 10 });\n  }\n}\nfor (const [key, before] of Object.entries(prev)) {\n  if (!cur[key] && okStores.has(before.store)) {\n    changes.push({ type: 'removed', store: before.store, title: before.title, price: before.price });\n  }\n}\n\n// Keep last known data for any source that failed this run, so one bad fetch doesn't wipe history.\nconst next = { ...cur };\nfor (const [key, before] of Object.entries(prev)) {\n  if (!okStores.has(before.store)) next[key] = before;\n}\nSD.prices = next;\nSD.lastRun = new Date().toISOString();\n\nconst inr = n => 'Rs. ' + Math.round(n).toLocaleString('en-IN');\nconst priceChanges = changes.filter(c => c.type === 'price').sort((a, b) => a.pct - b.pct);\nconst lines = [];\npriceChanges.forEach(c => lines.push('PRICE  ' + c.store + ' | ' + c.title + ': ' + inr(c.oldPrice) + ' -> ' + inr(c.newPrice) + ' (' + (c.pct > 0 ? '+' : '') + c.pct + '%)'));\nchanges.filter(c => c.type === 'new').forEach(c => lines.push('NEW    ' + c.store + ' | ' + c.title + ' at ' + inr(c.price)));\nchanges.filter(c => c.type === 'removed').forEach(c => lines.push('GONE   ' + c.store + ' | ' + c.title));\nif (failedStores.length) lines.push('WARNING: no usable data from: ' + failedStores.join(', '));\n\nconst summary = firstRun\n  ? 'Baseline saved: ' + Object.keys(cur).length + ' products across ' + okStores.size + ' stores. Changes appear from the next run.' + (failedStores.length ? '\\nWARNING: no usable data from: ' + failedStores.join(', ') : '')\n  : (lines.length ? lines.join('\\n') : 'No changes this week.');\n\nreturn [{ json: {\n  firstRun,\n  checkedStores: [...okStores],\n  failedStores,\n  productsTracked: Object.keys(cur).length,\n  counts: { price: priceChanges.length, new: changes.filter(c => c.type === 'new').length, removed: changes.filter(c => c.type === 'removed').length },\n  changes,\n  summary,\n} }];\n"
+      },
+      "id": "a1000000-0000-4000-8000-000000000005",
+      "name": "Compare with last week",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        780,
+        100
+      ]
+    }
+  ],
+  "connections": {
+    "Every Monday 9am": {
+      "main": [
+        [
+          {
+            "node": "Store List",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Manual Test": {
+      "main": [
+        [
+          {
+            "node": "Store List",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Store List": {
+      "main": [
+        [
+          {
+            "node": "Fetch products.json",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch products.json": {
+      "main": [
+        [
+          {
+            "node": "Compare with last week",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {}
+}
